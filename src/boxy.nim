@@ -47,6 +47,7 @@ type
     proj: Mat4
     frameSize: IVec2                 ## Dimensions of the window frame.
     vertexArrayId, layerFramebufferId: GLuint
+    targetFramebufferId: GLuint      ## Id of a framebuffer to render to, or 0 to draw directly to the screen
     frameBegun: bool
 
     # Buffer data for OpenGL
@@ -123,6 +124,9 @@ proc flush(boxy: Boxy) =
   boxy.activeShader.bindUniforms()
 
   boxy.drawVertexArray()
+
+proc setTargetFramebuffer*(boxy: Boxy, framebufferId: GLuint) =
+  boxy.targetFramebufferId = framebufferId
 
 proc drawToTexture(boxy: Boxy, texture: Texture) =
   glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebufferId)
@@ -370,6 +374,9 @@ proc removeImage*(boxy: Boxy, key: string) =
           boxy.takenTiles.unsafeSetFalse(tile.index)
     boxy.entries.del(key)
 
+proc hasImage*(boxy: Boxy, key: string): bool =
+  return key in boxy.entries
+
 proc addImage*(boxy: Boxy, key: string, image: Image, genMipmaps = true) =
   if key in boxy.entriesBuffered:
     raise newException(
@@ -573,7 +580,7 @@ proc popLayer*(
   let savedAtlasTexture = boxy.atlasTexture
 
   if boxy.layerNum == -1:
-    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    glBindFramebuffer(GL_FRAMEBUFFER, boxy.targetFramebufferId)
   else:
     boxy.drawToTexture(boxy.layerTextures[boxy.layerNum])
 
@@ -818,6 +825,8 @@ proc beginFrame*(boxy: Boxy, frameSize: IVec2, proj: Mat4, clearFrame = true) =
     glClearColor(0, 0, 0, 0)
     glClear(GL_COLOR_BUFFER_BIT)
 
+  glBindFramebuffer(GL_FRAMEBUFFER, boxy.targetFramebufferId)
+
 proc beginFrame*(boxy: Boxy, frameSize: IVec2, clearFrame = true) {.inline.} =
   beginFrame(
     boxy,
@@ -833,6 +842,7 @@ proc endFrame*(boxy: Boxy) =
   if boxy.layerNum != -1:
     raise newException(BoxyError, "Not all layers have been popped")
 
+  glBindFramebuffer(GL_FRAMEBUFFER, boxy.targetFramebufferId)
   boxy.frameBegun = false
   boxy.flush()
 
