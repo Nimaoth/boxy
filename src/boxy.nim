@@ -49,6 +49,7 @@ type
     vertexArrayId, layerFramebufferId: GLuint
     targetFramebufferId: GLuint      ## Id of a framebuffer to render to, or 0 to draw directly to the screen
     frameBegun: bool
+    maxAtlasSize: int
 
     # Buffer data for OpenGL
     positions: tuple[buffer: Buffer, data: seq[float32]]
@@ -105,7 +106,7 @@ proc drawVertexArray(boxy: Boxy) =
   )
   boxy.quadCount = 0
 
-proc flush(boxy: Boxy) =
+proc flush*(boxy: Boxy) =
   ## Flips - draws current buffer and starts a new one.
   if boxy.quadCount == 0:
     return
@@ -316,8 +317,27 @@ proc newBoxy*(
 
   result.addWhiteTile()
 
+  var maxAtlasSize: int32
+  glGetIntegerv(GL_MAX_TEXTURE_SIZE, maxAtlasSize.addr)
+  result.maxAtlasSize = maxAtlasSize
+
+  if result.maxAtlasSize < result.atlasSize:
+    raise newException(
+      BoxyError,
+      "Requested atlas texture is larger then max supported size: " &
+      $result.maxAtlasSize
+    )
+
 proc grow(boxy: Boxy) =
   ## Grows the atlas size by 2 (growing area by 4).
+
+  if boxy.atlasSize == boxy.maxAtlasSize:
+    raise newException(
+      BoxyError,
+      "Can't grow boxy atlas texture, max supported size reached: " &
+      $boxy.maxAtlasSize
+    )
+
   boxy.flush()
 
   # Read old atlas content
@@ -326,6 +346,9 @@ proc grow(boxy: Boxy) =
     oldTileRun = boxy.tileRun
 
   boxy.atlasSize *= 2
+  if boxy.atlasSize > boxy.maxAtlasSize:
+    boxy.atlasSize = boxy.maxAtlasSize
+
   boxy.tileRun = boxy.atlasSize div (boxy.tileSize + tileMargin)
   boxy.maxTiles = boxy.tileRun * boxy.tileRun
   boxy.takenTiles.setLen(boxy.maxTiles)
@@ -725,6 +748,8 @@ proc blurEffect(
 
 proc blurEffect*(boxy: Boxy, radius: float32) =
   ## Blurs the current layer
+  if boxy.layerNum == -1:
+    raise newException(BoxyError, "blurEffect called without pushLayer")
   let layerTexture = boxy.layerTextures[boxy.layerNum]
   boxy.blurEffect(
     radius,
@@ -998,7 +1023,8 @@ proc drawImage*(
   key: string,
   center: Vec2,
   angle: float32,
-  tint = color(1, 1, 1, 1)
+  tint = color(1, 1, 1, 1),
+  scale: float32 = 1
 ) =
   ## Draws image at center and rotated by angle.
   ## The image should have already been added.
@@ -1006,6 +1032,23 @@ proc drawImage*(
   boxy.saveTransform()
   boxy.translate(center)
   boxy.rotate(angle)
+  boxy.scale(vec2(scale, scale))
   boxy.translate(-imageInfo.size.vec2 / 2)
   boxy.drawImage(key, pos = vec2(0, 0), tint)
   boxy.restoreTransform()
+
+proc getImage*(boxy: Boxy, bounds: Rect): Image =
+  ## Gets an Image rectangle from the current layer.
+  ## Note: This is very close because it transfers GPU data to CPU.
+  ## It's not recommended to use this in a game loop.
+  if boxy.layerNum == -1:
+    raise newException(BoxyError, "getImage called without pushLayer")
+  let layerTexture = boxy.layerTextures[boxy.layerNum]
+  let fullLayer = layerTexture.readImage()
+  fullLayer.flipVertical()
+  return fullLayer.subImage(
+    bounds.x.int,
+    bounds.y.int,
+    bounds.w.int,
+    bounds.h.int
+  )

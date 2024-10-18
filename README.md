@@ -1,4 +1,4 @@
-<img src="docs/boxyBanner.png">
+<img src="docs/banner.png">
 
 # Boxy - 2D GPU rendering with a tiling atlas.
 
@@ -6,7 +6,7 @@
 
 ![Github Actions](https://github.com/treeform/boxy/workflows/Github%20Actions/badge.svg)
 
-[API reference](https://nimdocs.com/treeform/boxy)
+[API reference](https://treeform.github.io/boxy)
 
 ## About
 
