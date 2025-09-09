@@ -56,6 +56,9 @@ type
     colors: tuple[buffer: Buffer, data: seq[uint8]]
     uvs: tuple[buffer: Buffer, data: seq[float32]]
     indices: tuple[buffer: Buffer, data: seq[uint16]]
+    textureIndices: tuple[buffer: Buffer, data: seq[uint8]]
+
+    textures: Table[GLuint, uint8]
 
 proc vec2(x, y: SomeNumber): Vec2 {.inline.} =
   ## Integer short cut for creating vectors.
@@ -85,9 +88,11 @@ proc upload(boxy: Boxy) =
   boxy.colors.buffer.count = boxy.quadCount * 4
   boxy.uvs.buffer.count = boxy.quadCount * 4
   boxy.indices.buffer.count = boxy.quadCount * 6
+  boxy.textureIndices.buffer.count = boxy.quadCount * 4
   bindBufferData(boxy.positions.buffer, boxy.positions.data[0].addr)
   bindBufferData(boxy.colors.buffer, boxy.colors.data[0].addr)
   bindBufferData(boxy.uvs.buffer, boxy.uvs.data[0].addr)
+  bindBufferData(boxy.textureIndices.buffer, boxy.textureIndices.data[0].addr)
 
 proc contains*(boxy: Boxy, key: string): bool {.inline.} =
   key in boxy.entries
@@ -120,11 +125,24 @@ proc flush*(boxy: Boxy) =
 
   glActiveTexture(GL_TEXTURE0)
   glBindTexture(GL_TEXTURE_2D, boxy.atlasTexture.textureId)
-  boxy.activeShader.setUniform("atlasTex", 0)
+
+  for textureId, index in boxy.textures:
+    glActiveTexture(GLenum(GL_TEXTURE0.int + index.int))
+    glBindTexture(GL_TEXTURE_2D, textureId)
+
+  if boxy.activeShader.hasUniform("atlasTex"):
+    boxy.activeShader.setUniform("atlasTex", 0)
 
   boxy.activeShader.bindUniforms()
 
+  var units = [0.int32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+  let loc = glGetUniformLocation(boxy.activeShader.programId, "atlasTexs")
+  glUniform1iv(loc, units.len.GLint, units[0].addr)
+
   boxy.drawVertexArray()
+  glActiveTexture(GL_TEXTURE0)
+
+  boxy.textures.clear()
 
 proc setTargetFramebuffer*(boxy: Boxy, framebufferId: GLuint) =
   boxy.targetFramebufferId = framebufferId
@@ -184,7 +202,10 @@ proc clearAtlas*(boxy: Boxy) =
 proc newBoxy*(
   atlasSize = 512,
   tileSize = 32 - tileMargin,
-  quadsPerBatch = 1024
+  quadsPerBatch = 1024,
+  vertexShader: string = "",
+  fragmentShader: string = "",
+  maskShader: string = "",
 ): Boxy =
   ## Creates a new Boxy.
   if atlasSize mod (tileSize + tileMargin) != 0:
@@ -216,14 +237,24 @@ proc newBoxy*(
       "glsl/100/mask.frag"
     )
   else:
-    result.atlasShader = newShaderStatic(
-      "glsl/410/atlas.vert",
-      "glsl/410/atlas.frag"
-    )
-    result.maskShader = newShaderStatic(
-      "glsl/410/atlas.vert",
-      "glsl/410/mask.frag"
-    )
+    if vertexShader.len > 0:
+      result.atlasShader = newShader(
+        vertexShader,
+        fragmentShader,
+      )
+      result.maskShader = newShader(
+        vertexShader,
+        maskShader,
+      )
+    else:
+      result.atlasShader = newShaderStatic(
+        "glsl/450/atlas.vert",
+        "glsl/450/atlas.frag"
+      )
+      result.maskShader = newShaderStatic(
+        "glsl/450/atlas.vert",
+        "glsl/450/mask.frag"
+      )
     result.blendShader = newShader(
       ("atlasVert", toGLSL(atlasVert)),
       ("blendingMain", toGLSL(blendingMain))
@@ -277,6 +308,14 @@ proc newBoxy*(
   result.indices.buffer.target = GL_ELEMENT_ARRAY_BUFFER
   result.indices.buffer.count = quadsPerBatch * 6
 
+  result.textureIndices.buffer = Buffer()
+  result.textureIndices.buffer.componentType = GL_UNSIGNED_BYTE
+  result.textureIndices.buffer.kind = bkSCALAR
+  result.textureIndices.buffer.target = GL_ARRAY_BUFFER
+  result.textureIndices.data = newSeq[uint8](quadsPerBatch * 4)
+  result.textureIndices.buffer.count = quadsPerBatch * 4
+  bindBufferData(result.textureIndices.buffer, result.textureIndices.data[0].addr)
+
   for i in 0 ..< quadsPerBatch:
     let offset = i * 4
     result.indices.data.add([
@@ -301,6 +340,7 @@ proc newBoxy*(
   result.activeShader.bindAttrib("vertexPos", result.positions.buffer)
   result.activeShader.bindAttrib("vertexColor", result.colors.buffer)
   result.activeShader.bindAttrib("vertexUv", result.uvs.buffer)
+  result.activeShader.bindAttrib("vertexTextureIndex", result.textureIndices.buffer)
 
   let status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
   if status != GL_FRAMEBUFFER_COMPLETE:
@@ -478,13 +518,30 @@ proc setVertColor(buf: var seq[uint8], i: int, rgbx: ColorRGBX) =
   buf[i * 4 + 2] = rgbx.b
   buf[i * 4 + 3] = rgbx.a
 
-proc drawQuad(
+proc toRgbaFast*(c: Color): ColorRGBA {.inline.} =
+  ## Convert Color to ColorRGBA
+  result.r = (c.r * 255 + 0.5).uint8
+  result.g = (c.g * 255 + 0.5).uint8
+  result.b = (c.b * 255 + 0.5).uint8
+  result.a = (c.a * 255 + 0.5).uint8
+
+proc drawQuad*(
   boxy: Boxy,
   verts: array[4, Vec2],
   uvs: array[4, Vec2],
-  tints: array[4, Color]
+  tints: array[4, Color],
+  textureId: GLuint,
 ) =
   boxy.checkBatch()
+  var textureIndex = 0.uint8
+  if textureId != 0:
+    boxy.textures.withValue(textureId, i):
+      textureIndex = i[]
+    do:
+      if boxy.textures.len >= 31:
+        boxy.flush()
+      textureIndex = boxy.textures.len.uint8 + 1
+      boxy.textures[textureId] = textureIndex
 
   let offset = boxy.quadCount * 4
   boxy.positions.data.setVert(offset + 0, verts[0])
@@ -497,14 +554,19 @@ proc drawQuad(
   boxy.uvs.data.setVert(offset + 2, uvs[2])
   boxy.uvs.data.setVert(offset + 3, uvs[3])
 
-  boxy.colors.data.setVertColor(offset + 0, tints[0].asRgbx())
-  boxy.colors.data.setVertColor(offset + 1, tints[1].asRgbx())
-  boxy.colors.data.setVertColor(offset + 2, tints[2].asRgbx())
-  boxy.colors.data.setVertColor(offset + 3, tints[3].asRgbx())
+  boxy.colors.data.setVertColor(offset + 0, tints[0].toRgbaFast().rgbx)
+  boxy.colors.data.setVertColor(offset + 1, tints[1].toRgbaFast().rgbx)
+  boxy.colors.data.setVertColor(offset + 2, tints[2].toRgbaFast().rgbx)
+  boxy.colors.data.setVertColor(offset + 3, tints[3].toRgbaFast().rgbx)
+
+  boxy.textureIndices.data[offset + 0] = textureIndex
+  boxy.textureIndices.data[offset + 1] = textureIndex
+  boxy.textureIndices.data[offset + 2] = textureIndex
+  boxy.textureIndices.data[offset + 3] = textureIndex
 
   inc boxy.quadCount
 
-proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color) =
+proc drawUvRect*(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color, textureId: GLuint = 0) =
   ## Adds an image rect with a path to an ctx
   ## at, to, uvAt, uvTo are all in pixels
   let
@@ -514,8 +576,13 @@ proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color) =
       boxy.mat * vec2(to.x, at.y),
       boxy.mat * vec2(at.x, at.y),
     ]
+  var
+    uvAt = uvAt
+    uvTo = uvTo
+  if textureId == 0:
     uvAt = uvAt / boxy.atlasSize.float32
     uvTo = uvTo / boxy.atlasSize.float32
+  let
     uvQuad = [
       vec2(uvAt.x, uvTo.y),
       vec2(uvTo.x, uvTo.y),
@@ -524,7 +591,7 @@ proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color) =
     ]
     tints = [tint, tint, tint, tint]
 
-  boxy.drawQuad(posQuad, uvQuad, tints)
+  boxy.drawQuad(posQuad, uvQuad, tints, textureId)
 
 proc drawRect*(
   boxy: Boxy,
@@ -537,7 +604,7 @@ proc drawRect*(
       rect.xy + rect.wh,
       vec2(boxy.tileSize / 2, boxy.tileSize / 2),
       vec2(boxy.tileSize / 2, boxy.tileSize / 2),
-      color
+      color,
     )
 
 proc readyTmpTexture(boxy: Boxy) =
