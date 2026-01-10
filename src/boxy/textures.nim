@@ -29,6 +29,10 @@ type
     wrapS*, wrapT*: Wrap
     genMipmap*: bool
     textureId*: GLuint
+    buffers*: array[2, GLuint] # for streaming updates
+    bufferData*: array[2, pointer] # for streaming updates
+    currentBuffer*: int
+    streaming*: bool = false
 
 proc bindTextureBufferData*(texture: Texture, buffer: Buffer, data: pointer) =
   ## Binds data to a texture buffer.
@@ -82,7 +86,7 @@ func getFormat(image: Image): GLenum =
   ## Gets the format of the image.
   result = GL_RGBA
 
-proc newTexture*(image: Image): Texture =
+proc newTexture*(image: Image, streaming: bool = false, genMipmap: bool = false): Texture =
   ## Creates a new format.
   result = Texture()
   result.width = image.width.GLint
@@ -90,12 +94,50 @@ proc newTexture*(image: Image): Texture =
   result.componentType = GL_UNSIGNED_BYTE
   result.format = image.getFormat()
   result.internalFormat = GL_RGBA8
-  result.genMipmap = true
-  result.minFilter = minLinearMipmapLinear
+  result.genMipmap = genMipmap
+  result.minFilter = minLinear
   result.magFilter = magLinear
+  result.streaming = streaming
   bindTextureData(result, image.data[0].addr)
 
-proc updateSubImage*(texture: Texture, x, y: int, image: Image, level: int) =
+  if streaming:
+    glGenBuffers(2, result.buffers[0].addr)
+    for i in 0..result.buffers.high:
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, result.buffers[i])
+      let size = image.width * image.height * 4
+      glBufferData(GL_PIXEL_UNPACK_BUFFER, size, nil, GL_STREAM_DRAW)
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
+
+proc streamImage*(texture: Texture, data: pointer) =
+  assert texture.buffers[0] != 0
+  # Update current frame buffer
+  glBindTexture(GL_TEXTURE_2D, texture.textureId)
+  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, texture.buffers[texture.currentBuffer])
+  glTexSubImage2D(
+    GL_TEXTURE_2D,
+    level = 0,
+    xoffset = 0,
+    yoffset = 0,
+    width = texture.width.GLint,
+    height = texture.height.GLint,
+    format = texture.format,
+    `type` = texture.componentType,
+    pixels = nil,
+  )
+
+  # Upload to next frame buffer
+  let nextIndex = (texture.currentBuffer + 1) mod texture.buffers.len
+  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, texture.buffers[nextIndex])
+  let size = texture.width * texture.height * 4
+  texture.bufferData[nextIndex] = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size, GL_MAP_WRITE_BIT or GL_MAP_INVALIDATE_BUFFER_BIT or GL_MAP_UNSYNCHRONIZED_BIT)
+  if texture.bufferData[nextIndex] != nil:
+    copyMem(texture.bufferData[nextIndex], data, size)
+    discard glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)
+  texture.currentBuffer = nextIndex
+
+  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
+
+proc updateSubImage*(texture: Texture, x, y, w, h: int, data: pointer, format: GLenum, level: int) =
   ## Update a small part of a texture image.
   glBindTexture(GL_TEXTURE_2D, texture.textureId)
   glTexSubImage2D(
@@ -103,12 +145,16 @@ proc updateSubImage*(texture: Texture, x, y: int, image: Image, level: int) =
     level = level.GLint,
     xoffset = x.GLint,
     yoffset = y.GLint,
-    width = image.width.GLint,
-    height = image.height.GLint,
-    format = image.getFormat(),
+    width = w.GLint,
+    height = h.GLint,
+    format = format,
     `type` = GL_UNSIGNED_BYTE,
-    pixels = image.data[0].addr
+    pixels = data
   )
+
+proc updateSubImage*(texture: Texture, x, y: int, image: Image, level: int) =
+  ## Update a small part of a texture image.
+  texture.updateSubImage(x, y, image.width, image.height, image.data[0].addr, image.getFormat(), level)
 
 proc updateSubImage*(texture: Texture, x, y: int, image: Image) =
   ## Update a small part of texture with a new image.
