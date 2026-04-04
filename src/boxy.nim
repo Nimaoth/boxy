@@ -14,6 +14,8 @@ type
   TileKind = enum
     tkIndex, tkColor
 
+  ImageKey* = uint64
+
   TileInfo = object
     case kind: TileKind
     of tkIndex:
@@ -38,8 +40,8 @@ type
     quadsPerBatch: int               ## Max quads in a batch before issuing an OpenGL call.
     mat: Mat3                        ## The current matrix.
     mats: seq[Mat3]                  ## The matrix stack.
-    entries: Table[string, ImageInfo]
-    entriesBuffered: HashSet[string] ## Entires used by not flushed yet.
+    entries: Table[ImageKey, ImageInfo]
+    entriesBuffered: HashSet[ImageKey] ## Entires used by not flushed yet.
     tileSize: int
     maxTiles: int
     tileRun: int
@@ -94,7 +96,7 @@ proc upload(boxy: Boxy) =
   bindBufferData(boxy.uvs.buffer, boxy.uvs.data[0].addr)
   bindBufferData(boxy.textureIndices.buffer, boxy.textureIndices.data[0].addr)
 
-proc contains*(boxy: Boxy, key: string): bool {.inline.} =
+proc contains*(boxy: Boxy, key: ImageKey): bool {.inline.} =
   key in boxy.entries
 
 proc drawVertexArray(boxy: Boxy) =
@@ -422,7 +424,7 @@ proc takeFreeTile(boxy: Boxy): int =
   boxy.grow()
   boxy.takeFreeTile()
 
-proc removeImage*(boxy: Boxy, key: string) =
+proc removeImage*(boxy: Boxy, key: ImageKey) =
   ## Removes an image, does nothing if the image has not been added.
   if key in boxy.entriesBuffered:
     raise newException(
@@ -437,10 +439,10 @@ proc removeImage*(boxy: Boxy, key: string) =
           boxy.takenTiles.unsafeSetFalse(tile.index)
     boxy.entries.del(key)
 
-proc hasImage*(boxy: Boxy, key: string): bool =
+proc hasImage*(boxy: Boxy, key: ImageKey): bool =
   return key in boxy.entries
 
-proc addImage*(boxy: Boxy, key: string, image: Image, genMipmaps = true) =
+proc addImage*(boxy: Boxy, key: ImageKey, image: Image, genMipmaps = true) =
   if key in boxy.entriesBuffered:
     raise newException(
       BoxyError,
@@ -499,7 +501,7 @@ proc addImage*(boxy: Boxy, key: string, image: Image, genMipmaps = true) =
 
   boxy.entries[key] = imageInfo
 
-proc getImageSize*(boxy: Boxy, key: string): IVec2 =
+proc getImageSize*(boxy: Boxy, key: ImageKey): IVec2 =
   ## Return the size of an inserted image.
   boxy.entries[key].size
 
@@ -990,13 +992,13 @@ proc toScreen*(boxy: Boxy, windowFrame: Vec2, v: Vec2): Vec2 =
 
 proc drawImage*(
   boxy: Boxy,
-  key: string,
+  key: ImageKey,
   pos: Vec2,
   tint = color(1, 1, 1, 1)
 ) =
   ## Draws image at pos from top-left.
   ## The image should have already been added.
-  let imageInfo = boxy.entries[key]
+  let imageInfo {.cursor.} = boxy.entries[key]
   if imageInfo.tiles.len == 0:
     boxy.drawRect(
       rect(pos, imageInfo.size.vec2),
@@ -1067,13 +1069,13 @@ proc drawImage*(
 
 proc drawImage*(
   boxy: Boxy,
-  key: string,
+  key: ImageKey,
   rect: Rect,
   tint = color(1, 1, 1, 1)
 ) =
   ## Draws image at filling the ract.
   ## The image should have already been added.
-  let imageInfo = boxy.entries[key]
+  let imageInfo {.cursor.} = boxy.entries[key]
   boxy.saveTransform()
   let
     scale = rect.wh / imageInfo.size.vec2
@@ -1087,7 +1089,7 @@ proc drawImage*(
 
 proc drawImage*(
   boxy: Boxy,
-  key: string,
+  key: ImageKey,
   center: Vec2,
   angle: float32,
   tint = color(1, 1, 1, 1),
@@ -1095,7 +1097,7 @@ proc drawImage*(
 ) =
   ## Draws image at center and rotated by angle.
   ## The image should have already been added.
-  let imageInfo = boxy.entries[key]
+  let imageInfo {.cursor.} = boxy.entries[key]
   boxy.saveTransform()
   boxy.translate(center)
   boxy.rotate(angle)
